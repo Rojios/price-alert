@@ -1,15 +1,15 @@
 timezone: "Asia/Bangkok"
 
 watchlist:
-  - symbol: "GC=F"
-    name: "Gold Futures (COMEX)"
+  - symbol: "XAUUSD=X"
+    name: "Gold Spot (XAUUSD)"
     alerts:
       - type: price_above
         threshold: 3200
         message: "Gold breaking key resistance!"
       - type: price_below
-        threshold: 2800
-        message: "Gold dropping below support!"
+        threshold: 3000
+        message: "Gold dropping below 3,000!"
       - type: pct_change
         threshold: 1.5
         message: "Gold making a big move today."
