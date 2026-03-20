@@ -5,11 +5,11 @@ watchlist:
     name: "Gold Spot (XAUUSD)"
     alerts:
       - type: price_above
-        threshold: 3200
+        threshold: 4700
         message: "Gold breaking key resistance!"
       - type: price_below
-        threshold: 3000
-        message: "Gold dropping below 3,000!"
+        threshold: 4400
+        message: "Gold dropping below support!"
       - type: pct_change
         threshold: 1.5
         message: "Gold making a big move today."
