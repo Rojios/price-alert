@@ -13,14 +13,10 @@ import logging
 from datetime import datetime
 
 import requests
-import yfinance as yf
 import pytz
 from curl_cffi import requests as curl_requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
-# Use curl_cffi session to bypass Yahoo Finance bot detection
-_YF_SESSION = curl_requests.Session(impersonate="chrome")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,16 +24,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# curl_cffi session — impersonates Chrome to bypass Yahoo Finance bot detection
+_SESSION = curl_requests.Session(impersonate="chrome120")
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.environ["TELEGRAM_CHAT_ID"])
-GH_PAT = os.environ["GH_PAT"]                    # GitHub Personal Access Token
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "Rojios/price-alert")
-ALERTS_PATH = "alerts.json"
-TZ = pytz.timezone("Asia/Bangkok")
+GH_PAT         = os.environ["GH_PAT"]
+GITHUB_REPO    = os.environ.get("GITHUB_REPO", "Rojios/price-alert")
+ALERTS_PATH    = "alerts.json"
+TZ             = pytz.timezone("Asia/Bangkok")
 
-# Friendly name → yfinance symbol
 SYMBOL_MAP = {
     "XAUUSD": "XAUUSD=X",
     "GOLD":   "XAUUSD=X",
@@ -52,12 +50,49 @@ SYMBOL_MAP = {
 
 
 def normalize_symbol(raw: str) -> tuple[str, str]:
-    """Return (yfinance_symbol, display_label)."""
     upper = raw.upper().strip()
     return SYMBOL_MAP.get(upper, upper), upper
 
 
-# ── GitHub API helpers ───────────────────────────────────────────────────────
+# ── Price Fetching (direct Yahoo Finance API, no yfinance) ───────────────────
+
+def fetch_price(symbol: str) -> tuple[float | None, float | None]:
+    """
+    Fetch current price and previous close directly from Yahoo Finance v8 API.
+    Returns (current_price, prev_close) or (None, None) on failure.
+    """
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        resp = _SESSION.get(
+            url,
+            params={"interval": "1d", "range": "5d"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        result = (data.get("chart") or {}).get("result")
+        if not result:
+            logger.error(f"No chart result for {symbol}: {data}")
+            return None, None
+
+        closes = [
+            c for c in result[0]["indicators"]["quote"][0]["close"]
+            if c is not None
+        ]
+        if not closes:
+            return None, None
+
+        current = float(closes[-1])
+        prev    = float(closes[-2]) if len(closes) >= 2 else current
+        return current, prev
+
+    except Exception as exc:
+        logger.exception(f"fetch_price({symbol}) failed")
+        return None, None
+
+
+# ── GitHub API helpers ────────────────────────────────────────────────────────
 
 def _gh_headers() -> dict:
     return {
@@ -67,20 +102,18 @@ def _gh_headers() -> dict:
 
 
 def read_alerts() -> tuple[list, str | None]:
-    """Fetch alerts.json from GitHub. Returns (alerts_list, sha_or_None)."""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ALERTS_PATH}"
+    url  = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ALERTS_PATH}"
     resp = requests.get(url, headers=_gh_headers(), timeout=10)
     if resp.status_code == 404:
         return [], None
     resp.raise_for_status()
     data = resp.json()
-    raw = base64.b64decode(data["content"]).decode()
+    raw  = base64.b64decode(data["content"]).decode()
     return json.loads(raw).get("alerts", []), data["sha"]
 
 
 def write_alerts(alerts: list, sha: str | None) -> None:
-    """Commit updated alerts.json to GitHub."""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ALERTS_PATH}"
+    url     = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ALERTS_PATH}"
     content = base64.b64encode(
         json.dumps({"alerts": alerts}, indent=2, ensure_ascii=False).encode()
     ).decode()
@@ -94,7 +127,7 @@ def write_alerts(alerts: list, sha: str | None) -> None:
     requests.put(url, headers=_gh_headers(), json=payload, timeout=10).raise_for_status()
 
 
-# ── Auth guard ───────────────────────────────────────────────────────────────
+# ── Auth guard ────────────────────────────────────────────────────────────────
 
 def auth_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -106,11 +139,11 @@ def auth_only(func):
     return wrapper
 
 
-# ── Command handlers ─────────────────────────────────────────────────────────
+# ── Command handlers ──────────────────────────────────────────────────────────
 
 @auth_only
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "📋 <b>Price Alert Bot</b>\n\n"
         "<b>ดูราคา</b>\n"
         "/price XAUUSD\n"
@@ -118,16 +151,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>ตั้ง Alert</b>\n"
         "/alert XAUUSD above 4700\n"
         "/alert XAUUSD below 4400\n"
-        "/alert XAUUSD change 1.5  ← ±% จาก prev close\n\n"
+        "/alert XAUUSD change 1.5\n\n"
         "<b>จัดการ Alert</b>\n"
         "/alerts       — ดู alert ทั้งหมด\n"
         "/remove 2     — ลบ alert หมายเลข 2\n\n"
-        "<b>Symbols ที่ใช้ได้</b>\n"
-        "XAUUSD, GC, SILVER, OIL\n"
-        "BTC, ETH\n"
-        "PTT, KBANK, หรือ symbol ใดก็ได้ใน yfinance"
+        "<b>Symbols</b>\n"
+        "XAUUSD, GC, SILVER, OIL, BTC, ETH\n"
+        "PTT, KBANK หรือ symbol ใดก็ได้",
+        parse_mode="HTML",
     )
-    await update.message.reply_text(text, parse_mode="HTML")
 
 
 @auth_only
@@ -137,37 +169,32 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     yf_sym, label = normalize_symbol(context.args[0])
-    try:
-        ticker = yf.Ticker(yf_sym, session=_YF_SESSION)
-        hist = ticker.history(period="5d", interval="1d")
-        if hist.empty:
-            await update.message.reply_text(f"❌ ไม่พบราคาสำหรับ {label} ({yf_sym})\nลองใช้ symbol เต็ม เช่น XAUUSD=X หรือ PTT.BK")
-            return
+    await update.message.reply_text("⏳ กำลังดึงราคา...")
 
-        current = float(hist["Close"].iloc[-1])
-        prev    = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else current
-        pct     = (current - prev) / prev * 100
-        arrow   = "▲" if pct >= 0 else "▼"
-        now_str = datetime.now(TZ).strftime("%d %b %Y  %H:%M %Z")
-
+    current, prev = fetch_price(yf_sym)
+    if current is None:
         await update.message.reply_text(
-            f"💰 <b>{label}</b>\n"
-            f"ราคา : <b>{current:,.2f}</b>\n"
-            f"เมื่อวาน : {prev:,.2f}\n"
-            f"เปลี่ยน : {arrow} {abs(pct):.2f}%\n"
-            f"🕐 {now_str}",
-            parse_mode="HTML",
+            f"❌ ดึงราคา {label} ({yf_sym}) ไม่ได้\n"
+            f"ตรวจสอบว่า symbol ถูกต้อง เช่น XAUUSD, PTT.BK, BTC"
         )
-    except Exception as exc:
-        logger.exception("Price fetch failed")
-        await update.message.reply_text(f"❌ Error: {exc}")
+        return
+
+    pct     = (current - prev) / prev * 100 if prev else 0
+    arrow   = "▲" if pct >= 0 else "▼"
+    now_str = datetime.now(TZ).strftime("%d %b %Y  %H:%M %Z")
+
+    await update.message.reply_text(
+        f"💰 <b>{label}</b>\n"
+        f"ราคา    : <b>{current:,.2f}</b>\n"
+        f"เมื่อวาน : {prev:,.2f}\n"
+        f"เปลี่ยน  : {arrow} {abs(pct):.2f}%\n"
+        f"🕐 {now_str}",
+        parse_mode="HTML",
+    )
 
 
 @auth_only
 async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /alert XAUUSD above 4700
-    # /alert XAUUSD below 4400
-    # /alert XAUUSD change 1.5
     args = context.args
     if len(args) != 3:
         await update.message.reply_text(
@@ -229,18 +256,17 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts, _ = read_alerts()
     if not alerts:
         await update.message.reply_text(
-            "ยังไม่มี alert\nตั้งได้เลยเช่น /alert XAUUSD above 4700"
+            "ยังไม่มี alert\nตั้งได้เลย เช่น /alert XAUUSD above 4700"
         )
         return
 
     lines = ["📋 <b>Alert ที่ตั้งไว้</b>\n"]
     for i, a in enumerate(alerts, 1):
-        t      = a["type"]
-        thresh = a["threshold"]
-        sym    = a.get("label", a["symbol"])
-        cond   = (
-            f"above {thresh:,.2f}"  if t == "price_above" else
-            f"below {thresh:,.2f}"  if t == "price_below" else
+        t, thresh = a["type"], a["threshold"]
+        sym  = a.get("label", a["symbol"])
+        cond = (
+            f"above {thresh:,.2f}" if t == "price_above" else
+            f"below {thresh:,.2f}" if t == "price_below" else
             f"change ±{thresh}%"
         )
         lines.append(f"{i}. <b>{sym}</b> — {cond}")
@@ -252,7 +278,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @auth_only
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /remove 2\nดู /alerts ก่อนเพื่อเช็คหมายเลข")
+        await update.message.reply_text("Usage: /remove 2\nดู /alerts ก่อน")
         return
 
     try:
@@ -269,12 +295,10 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     removed = alerts.pop(idx)
     write_alerts(alerts, sha)
 
-    sym   = removed.get("label", removed["symbol"])
-    t     = removed["type"]
-    thresh = removed["threshold"]
-    cond  = (
-        f"above {thresh:,.2f}"  if t == "price_above" else
-        f"below {thresh:,.2f}"  if t == "price_below" else
+    sym, t, thresh = removed.get("label", removed["symbol"]), removed["type"], removed["threshold"]
+    cond = (
+        f"above {thresh:,.2f}" if t == "price_above" else
+        f"below {thresh:,.2f}" if t == "price_below" else
         f"change ±{thresh}%"
     )
     await update.message.reply_text(f"🗑 ลบแล้ว: <b>{sym}</b> — {cond}", parse_mode="HTML")
