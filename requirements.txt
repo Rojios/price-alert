@@ -3,3 +3,4 @@ requests==2.32.3
 PyYAML==6.0.2
 pytz==2024.2
 python-telegram-bot==21.6
+curl_cffi>=0.7.0

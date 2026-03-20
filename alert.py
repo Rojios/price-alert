@@ -11,6 +11,9 @@ import sys
 import yaml
 import yfinance as yf
 import requests
+from curl_cffi import requests as curl_requests
+
+_YF_SESSION = curl_requests.Session(impersonate="chrome")
 import pytz
 from datetime import datetime
 from pathlib import Path
@@ -67,8 +70,7 @@ def load_dynamic_watchlist() -> list[dict]:
 def get_price(symbol: str) -> tuple[float | None, float | None]:
     """Return (current_price, prev_close) or (None, None) on failure."""
     try:
-        ticker = yf.Ticker(symbol)
-        # Fetch 5-day daily history for reliable prev_close
+        ticker = yf.Ticker(symbol, session=_YF_SESSION)
         daily = ticker.history(period="5d", interval="1d")
         if daily.empty or len(daily) < 1:
             return None, None

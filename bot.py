@@ -15,8 +15,12 @@ from datetime import datetime
 import requests
 import yfinance as yf
 import pytz
+from curl_cffi import requests as curl_requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# Use curl_cffi session to bypass Yahoo Finance bot detection
+_YF_SESSION = curl_requests.Session(impersonate="chrome")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,9 +138,10 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     yf_sym, label = normalize_symbol(context.args[0])
     try:
-        hist = yf.Ticker(yf_sym).history(period="5d", interval="1d")
+        ticker = yf.Ticker(yf_sym, session=_YF_SESSION)
+        hist = ticker.history(period="5d", interval="1d")
         if hist.empty:
-            await update.message.reply_text(f"❌ ไม่พบราคาสำหรับ {label}")
+            await update.message.reply_text(f"❌ ไม่พบราคาสำหรับ {label} ({yf_sym})\nลองใช้ symbol เต็ม เช่น XAUUSD=X หรือ PTT.BK")
             return
 
         current = float(hist["Close"].iloc[-1])
