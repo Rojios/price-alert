@@ -1,0 +1,49 @@
+name: Price Alert
+
+on:
+  schedule:
+    # Every 15 minutes (GitHub Actions minimum granularity)
+    - cron: "*/15 * * * *"
+  workflow_dispatch:   # Allow manual trigger from the Actions tab
+
+permissions:
+  contents: write      # Required to commit alert_state.json back to the repo
+
+jobs:
+  check-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price alert
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alert.py
+
+      - name: Commit updated alert state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain alert_state.json)" ]; then
+            git add alert_state.json
+            git commit -m "chore: update alert state [skip ci]"
+            git push
+            echo "State committed."
+          else
+            echo "alert_state.json unchanged — no new alerts fired."
+          fi

@@ -1,0 +1,37 @@
+timezone: "Asia/Bangkok"
+
+watchlist:
+  - symbol: "GC=F"
+    name: "Gold Futures (COMEX)"
+    alerts:
+      - type: price_above
+        threshold: 3200
+        message: "Gold breaking key resistance!"
+      - type: price_below
+        threshold: 2800
+        message: "Gold dropping below support!"
+      - type: pct_change
+        threshold: 1.5
+        message: "Gold making a big move today."
+
+  - symbol: "PTT.BK"
+    name: "PTT PCL (SET)"
+    alerts:
+      - type: price_above
+        threshold: 35.0
+        message: "PTT above target."
+      - type: price_below
+        threshold: 28.0
+        message: "PTT below stop-loss zone."
+      - type: pct_change
+        threshold: 2.0
+        message: "PTT moving significantly."
+
+  # Add more symbols below, e.g.:
+  # - symbol: "KBANK.BK"
+  #   name: "Kasikorn Bank"
+  #   alerts:
+  #     - type: price_above
+  #       threshold: 145.0
+  #     - type: pct_change
+  #       threshold: 3.0
