@@ -15,9 +15,10 @@ import pytz
 from datetime import datetime
 from pathlib import Path
 
-CONFIG_FILE = Path(__file__).parent / "config.yaml"
-STATE_FILE = Path(__file__).parent / "alert_state.json"
-DEDUP_MINUTES = 60
+CONFIG_FILE        = Path(__file__).parent / "config.yaml"
+STATE_FILE         = Path(__file__).parent / "alert_state.json"
+DYNAMIC_ALERTS_FILE = Path(__file__).parent / "alerts.json"
+DEDUP_MINUTES      = 60
 
 
 # ── Config & State ──────────────────────────────────────────────────────────
@@ -37,6 +38,28 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+# ── Dynamic alerts (set via Telegram bot) ────────────────────────────────────
+
+def load_dynamic_watchlist() -> list[dict]:
+    """Load alerts.json written by bot.py and convert to watchlist format."""
+    if not DYNAMIC_ALERTS_FILE.exists():
+        return []
+    with open(DYNAMIC_ALERTS_FILE) as f:
+        entries = json.load(f).get("alerts", [])
+
+    by_symbol: dict[str, dict] = {}
+    for e in entries:
+        sym = e["symbol"]
+        if sym not in by_symbol:
+            by_symbol[sym] = {"symbol": sym, "name": e.get("label", sym), "alerts": []}
+        by_symbol[sym]["alerts"].append({
+            "type":      e["type"],
+            "threshold": e["threshold"],
+            "message":   "",
+        })
+    return list(by_symbol.values())
 
 
 # ── Price Fetching ───────────────────────────────────────────────────────────
@@ -151,7 +174,18 @@ def main() -> None:
 
     print(f"=== Price Alert Run: {now.strftime('%Y-%m-%d %H:%M %Z')} ===")
 
-    for item in config.get("watchlist", []):
+    # Merge static config.yaml watchlist + dynamic alerts.json
+    static    = config.get("watchlist", [])
+    dynamic   = load_dynamic_watchlist()
+    sym_index = {item["symbol"]: item for item in static}
+    for d in dynamic:
+        if d["symbol"] in sym_index:
+            sym_index[d["symbol"]]["alerts"].extend(d["alerts"])
+        else:
+            static.append(d)
+    watchlist = static
+
+    for item in watchlist:
         symbol: str = item["symbol"]
         name: str = item.get("name", symbol)
 
