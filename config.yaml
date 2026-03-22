@@ -35,3 +35,21 @@ watchlist:
   #       threshold: 145.0
   #     - type: pct_change
   #       threshold: 3.0
+
+# ── Daily Report ─────────────────────────────────────────────────────────────
+daily_report:
+  time: "17:00"          # Bangkok time (ICT, UTC+7)
+  days: [0,1,2,3,4]      # 0=Mon … 4=Fri (trading days only)
+  symbols:
+    - symbol: "^SET.BK"
+      name: "SET Index"
+    - symbol: "SAPPE.BK"
+      name: "SAPPE"
+    - symbol: "NSL.BK"
+      name: "NSL"
+    - symbol: "SISB.BK"
+      name: "SISB"
+    - symbol: "BH.BK"
+      name: "BH"
+    - symbol: "TIDLOR.BK"
+      name: "TIDLOR"

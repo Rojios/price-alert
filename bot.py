@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Interactive Telegram Bot — Price Alert Manager
-Commands: /price /alert /alerts /remove /help
+Interactive Telegram Bot — Price Alert Manager + Daily Report
+Commands: /price /alert /alerts /remove /report /help
 Stores user alerts in alerts.json via GitHub API.
 Runs as a persistent polling process on Railway.
 """
@@ -10,8 +10,10 @@ import os
 import json
 import base64
 import logging
-from datetime import datetime
+from datetime import datetime, time as dt_time
+from pathlib import Path
 
+import yaml
 import requests
 import pytz
 from curl_cffi import requests as curl_requests
@@ -24,17 +26,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# curl_cffi session — impersonates Chrome to bypass Yahoo Finance bot detection
 _SESSION = curl_requests.Session(impersonate="chrome120")
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
+BOT_TOKEN       = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.environ["TELEGRAM_CHAT_ID"])
-GH_PAT         = os.environ["GH_PAT"]
-GITHUB_REPO    = os.environ.get("GITHUB_REPO", "Rojios/price-alert")
-ALERTS_PATH    = "alerts.json"
-TZ             = pytz.timezone("Asia/Bangkok")
+GH_PAT          = os.environ["GH_PAT"]
+GITHUB_REPO     = os.environ.get("GITHUB_REPO", "Rojios/price-alert")
+ALERTS_PATH     = "alerts.json"
+CONFIG_FILE     = Path(__file__).parent / "config.yaml"
+TZ              = pytz.timezone("Asia/Bangkok")
 
 SYMBOL_MAP = {
     "XAUUSD": "XAUUSD=X",
@@ -44,9 +46,20 @@ SYMBOL_MAP = {
     "OIL":    "CL=F",
     "BTC":    "BTC-USD",
     "ETH":    "ETH-USD",
+    "SET":    "^SET.BK",
     "PTT":    "PTT.BK",
     "KBANK":  "KBANK.BK",
+    "SAPPE":  "SAPPE.BK",
+    "NSL":    "NSL.BK",
+    "SISB":   "SISB.BK",
+    "BH":     "BH.BK",
+    "TIDLOR": "TIDLOR.BK",
 }
+
+
+def load_config() -> dict:
+    with open(CONFIG_FILE) as f:
+        return yaml.safe_load(f)
 
 
 def normalize_symbol(raw: str) -> tuple[str, str]:
@@ -54,51 +67,37 @@ def normalize_symbol(raw: str) -> tuple[str, str]:
     return SYMBOL_MAP.get(upper, upper), upper
 
 
-# ── Price Fetching (direct Yahoo Finance API, no yfinance) ───────────────────
+# ── Price Fetching ────────────────────────────────────────────────────────────
 
 def fetch_price(symbol: str) -> tuple[float | None, float | None]:
     """
-    Fetch current price and previous close directly from Yahoo Finance v8 API.
+    Direct Yahoo Finance v8 API call via curl_cffi (Chrome120 impersonation).
     Returns (current_price, prev_close) or (None, None) on failure.
     """
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        resp = _SESSION.get(
-            url,
-            params={"interval": "1d", "range": "5d"},
-            timeout=15,
-        )
+        url  = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        resp = _SESSION.get(url, params={"interval": "1d", "range": "5d"}, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-
+        data   = resp.json()
         result = (data.get("chart") or {}).get("result")
         if not result:
-            logger.error(f"No chart result for {symbol}: {data}")
+            logger.error(f"No result for {symbol}: {data}")
             return None, None
-
-        closes = [
-            c for c in result[0]["indicators"]["quote"][0]["close"]
-            if c is not None
-        ]
+        closes = [c for c in result[0]["indicators"]["quote"][0]["close"] if c is not None]
         if not closes:
             return None, None
-
         current = float(closes[-1])
         prev    = float(closes[-2]) if len(closes) >= 2 else current
         return current, prev
-
-    except Exception as exc:
-        logger.exception(f"fetch_price({symbol}) failed")
+    except Exception:
+        logger.exception(f"fetch_price({symbol})")
         return None, None
 
 
-# ── GitHub API helpers ────────────────────────────────────────────────────────
+# ── GitHub API ────────────────────────────────────────────────────────────────
 
 def _gh_headers() -> dict:
-    return {
-        "Authorization": f"token {GH_PAT}",
-        "Accept": "application/vnd.github.v3+json",
-    }
+    return {"Authorization": f"token {GH_PAT}", "Accept": "application/vnd.github.v3+json"}
 
 
 def read_alerts() -> tuple[list, str | None]:
@@ -108,8 +107,7 @@ def read_alerts() -> tuple[list, str | None]:
         return [], None
     resp.raise_for_status()
     data = resp.json()
-    raw  = base64.b64decode(data["content"]).decode()
-    return json.loads(raw).get("alerts", []), data["sha"]
+    return json.loads(base64.b64decode(data["content"]).decode()).get("alerts", []), data["sha"]
 
 
 def write_alerts(alerts: list, sha: str | None) -> None:
@@ -139,6 +137,41 @@ def auth_only(func):
     return wrapper
 
 
+# ── Daily Report ──────────────────────────────────────────────────────────────
+
+async def build_report() -> str:
+    config  = load_config()
+    symbols = config.get("daily_report", {}).get("symbols", [])
+    now_str = datetime.now(TZ).strftime("%d %b %Y  %H:%M %Z")
+    lines   = [f"📈 <b>Daily Report</b>\n🕐 {now_str}\n"]
+
+    for item in symbols:
+        sym  = item["symbol"]
+        name = item.get("name", sym)
+        current, prev = fetch_price(sym)
+        if current is None:
+            lines.append(f"• <b>{name}</b> : ❌ N/A")
+            continue
+        pct   = (current - prev) / prev * 100 if prev else 0
+        arrow = "▲" if pct >= 0 else "▼"
+        lines.append(
+            f"• <b>{name}</b> : {current:,.2f}  {arrow} {abs(pct):.2f}%"
+        )
+
+    return "\n".join(lines)
+
+
+async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("Running daily report job")
+    try:
+        text = await build_report()
+        await context.bot.send_message(
+            chat_id=ALLOWED_CHAT_ID, text=text, parse_mode="HTML"
+        )
+    except Exception:
+        logger.exception("Daily report job failed")
+
+
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 @auth_only
@@ -155,9 +188,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>จัดการ Alert</b>\n"
         "/alerts       — ดู alert ทั้งหมด\n"
         "/remove 2     — ลบ alert หมายเลข 2\n\n"
+        "<b>Daily Report</b>\n"
+        "/report       — ดู report ตอนนี้เลย\n"
+        "📅 ส่งอัตโนมัติ ทุกวัน 17:00 น.\n\n"
         "<b>Symbols</b>\n"
-        "XAUUSD, GC, SILVER, OIL, BTC, ETH\n"
-        "PTT, KBANK หรือ symbol ใดก็ได้",
+        "XAUUSD, GC, BTC, ETH\n"
+        "SET, PTT, KBANK, SAPPE\n"
+        "NSL, SISB, BH, TIDLOR",
         parse_mode="HTML",
     )
 
@@ -174,8 +211,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current, prev = fetch_price(yf_sym)
     if current is None:
         await update.message.reply_text(
-            f"❌ ดึงราคา {label} ({yf_sym}) ไม่ได้\n"
-            f"ตรวจสอบว่า symbol ถูกต้อง เช่น XAUUSD, PTT.BK, BTC"
+            f"❌ ดึงราคา {label} ไม่ได้\nลองใช้ symbol เต็ม เช่น PTT.BK, SAPPE.BK"
         )
         return
 
@@ -194,6 +230,13 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @auth_only
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ กำลังดึงราคา...")
+    text = await build_report()
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+@auth_only
 async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) != 3:
@@ -206,7 +249,7 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     yf_sym, label = normalize_symbol(args[0])
-    cond = args[1].lower()
+    cond     = args[1].lower()
     type_map = {"above": "price_above", "below": "price_below", "change": "pct_change"}
 
     if cond not in type_map:
@@ -244,10 +287,7 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }[alert_type]
 
     await update.message.reply_text(
-        f"✅ ตั้ง Alert แล้ว\n"
-        f"🔖 {label} ({yf_sym})\n"
-        f"🔔 {cond_text}\n\n"
-        f"จะแจ้งเตือนใน 15 นาทีถัดไปถ้า condition ตรง",
+        f"✅ ตั้ง Alert แล้ว\n🔖 {label}\n🔔 {cond_text}"
     )
 
 
@@ -255,9 +295,7 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts, _ = read_alerts()
     if not alerts:
-        await update.message.reply_text(
-            "ยังไม่มี alert\nตั้งได้เลย เช่น /alert XAUUSD above 4700"
-        )
+        await update.message.reply_text("ยังไม่มี alert\nตั้งได้เลย เช่น /alert SAPPE above 13")
         return
 
     lines = ["📋 <b>Alert ที่ตั้งไว้</b>\n"]
@@ -271,16 +309,15 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         lines.append(f"{i}. <b>{sym}</b> — {cond}")
 
-    lines.append("\nลบ alert: /remove [หมายเลข]")
+    lines.append("\nลบ: /remove [หมายเลข]")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 @auth_only
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /remove 2\nดู /alerts ก่อน")
+        await update.message.reply_text("Usage: /remove 2")
         return
-
     try:
         idx = int(context.args[0]) - 1
     except ValueError:
@@ -294,7 +331,6 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     removed = alerts.pop(idx)
     write_alerts(alerts, sha)
-
     sym, t, thresh = removed.get("label", removed["symbol"]), removed["type"], removed["threshold"]
     cond = (
         f"above {thresh:,.2f}" if t == "price_above" else
@@ -307,13 +343,35 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    config = load_config()
+    report_cfg = config.get("daily_report", {})
+
+    # Parse report time (default 17:00 BKK = 10:00 UTC)
+    t_str = report_cfg.get("time", "17:00")
+    h, m  = map(int, t_str.split(":"))
+    # Convert BKK (UTC+7) to UTC
+    report_time_utc = dt_time(hour=(h - 7) % 24, minute=m, tzinfo=pytz.utc)
+    report_days = tuple(report_cfg.get("days", [0, 1, 2, 3, 4]))
+
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  cmd_help))
-    app.add_handler(CommandHandler("help",   cmd_help))
-    app.add_handler(CommandHandler("price",  cmd_price))
-    app.add_handler(CommandHandler("alert",  cmd_alert))
-    app.add_handler(CommandHandler("alerts", cmd_alerts))
-    app.add_handler(CommandHandler("remove", cmd_remove))
+
+    # Register commands
+    app.add_handler(CommandHandler("start",   cmd_help))
+    app.add_handler(CommandHandler("help",    cmd_help))
+    app.add_handler(CommandHandler("price",   cmd_price))
+    app.add_handler(CommandHandler("report",  cmd_report))
+    app.add_handler(CommandHandler("alert",   cmd_alert))
+    app.add_handler(CommandHandler("alerts",  cmd_alerts))
+    app.add_handler(CommandHandler("remove",  cmd_remove))
+
+    # Schedule daily report
+    app.job_queue.run_daily(
+        daily_report_job,
+        time=report_time_utc,
+        days=report_days,
+        name="daily_report",
+    )
+    logger.info(f"Daily report scheduled at {t_str} BKK (days={report_days})")
 
     logger.info("Bot polling started…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
